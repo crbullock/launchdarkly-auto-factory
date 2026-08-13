@@ -242,7 +242,7 @@ const EDIT_FILE_TOOL: AnthropicToolDef = {
 const RUN_TESTS_TOOL: AnthropicToolDef = {
   name: "run_tests",
   description:
-    "Run the repository's test suite (auto-detected: pytest for Python, `npm test` for Node, `go test` for Go; dependencies are installed first) and return the output. Use this AFTER writing tests to confirm they actually pass — fix any failures and re-run before committing. Optionally scope to a subdirectory.",
+    "Run the repository's test suite (auto-detected: pytest for Python, `npm test` for Node, `go test` for Go; dependencies are installed first) and return the output. JVM projects (Gradle/Maven) are recognized but NOT run in-agent — their suites need the build toolchain + service infra, so they're validated by the repo's CI; still write the test files on the branch. Use this AFTER writing tests to confirm they actually pass — fix any failures and re-run before committing. Optionally scope to a subdirectory.",
   input_schema: {
     type: "object",
     properties: { dir: { type: "string", description: "Subdirectory to run tests in (e.g. backend). Defaults to repo root." } },
@@ -1371,7 +1371,7 @@ export class SandboxToolExecutor {
     return s.length > 30_000 ? `${s.slice(0, 15_000)}\n…[output truncated]…\n${s.slice(-15_000)}` : s;
   }
 
-  /** Auto-detect the repo's test runner (pytest / npm / go), install deps, and run it. */
+  /** Auto-detect the repo's test runner (pytest / npm / go / gradle / maven), install deps, and run it. */
   private runTests(dir?: string): ToolExecResult {
     if (!this.allowEdits) return { content: "run_tests is not available", isError: true };
     const { ran, ...result } = this.runTestsInner(dir);
@@ -1437,7 +1437,31 @@ export class SandboxToolExecutor {
       const t = this.sh("go", ["test", "./..."], cwd);
       return { content: this.trunc(`$ go test ./... (in ${where})\n${t.out}`), isError: t.code !== 0, ran: true };
     }
-    return { content: "run_tests: no recognized test setup (pytest/npm/go) found in this directory", isError: true, ran: false };
+    // Gradle / Maven (JVM). A real service's suite needs the project's toolchain
+    // AND its infra (DB, other services) that an ephemeral agent doesn't have, so
+    // running `./gradlew test` here isn't meaningful — it would spuriously fail and
+    // stall the chain. Report inconclusive (ran:false — NOT a red run) so the chain
+    // proceeds; the flag-testing agent still WRITES the tests, and the repo's own CI
+    // (which has the JVM toolchain + infra) validates them via the Gradle/Maven build.
+    const isGradle =
+      has("gradlew") ||
+      has("build.gradle") ||
+      has("build.gradle.kts") ||
+      has("settings.gradle") ||
+      has("settings.gradle.kts");
+    if (isGradle || has("pom.xml")) {
+      const kind = isGradle ? "Gradle" : "Maven";
+      return {
+        content: `run_tests: ${kind} (JVM) project — its suite needs the build toolchain + service infra, so it is validated by the repo's CI (which runs the ${kind} build), not in-agent. Write/adjust the test files on the branch; CI runs them.`,
+        isError: true,
+        ran: false,
+      };
+    }
+    return {
+      content: "run_tests: no recognized test setup (pytest/npm/go/gradle/maven) found in this directory",
+      isError: true,
+      ran: false,
+    };
   }
 
   /** The package.json `test` script, if it's a real one (npm's default "no test specified" stub doesn't count). */

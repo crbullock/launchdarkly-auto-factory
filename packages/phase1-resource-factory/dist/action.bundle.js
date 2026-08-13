@@ -76283,7 +76283,7 @@ var EDIT_FILE_TOOL = {
 };
 var RUN_TESTS_TOOL = {
   name: "run_tests",
-  description: "Run the repository's test suite (auto-detected: pytest for Python, `npm test` for Node, `go test` for Go; dependencies are installed first) and return the output. Use this AFTER writing tests to confirm they actually pass \u2014 fix any failures and re-run before committing. Optionally scope to a subdirectory.",
+  description: "Run the repository's test suite (auto-detected: pytest for Python, `npm test` for Node, `go test` for Go; dependencies are installed first) and return the output. JVM projects (Gradle/Maven) are recognized but NOT run in-agent \u2014 their suites need the build toolchain + service infra, so they're validated by the repo's CI; still write the test files on the branch. Use this AFTER writing tests to confirm they actually pass \u2014 fix any failures and re-run before committing. Optionally scope to a subdirectory.",
   input_schema: {
     type: "object",
     properties: { dir: { type: "string", description: "Subdirectory to run tests in (e.g. backend). Defaults to repo root." } }
@@ -77221,7 +77221,7 @@ ${r6.error.message}` };
 \u2026[output truncated]\u2026
 ${s2.slice(-15e3)}` : s2;
   }
-  /** Auto-detect the repo's test runner (pytest / npm / go), install deps, and run it. */
+  /** Auto-detect the repo's test runner (pytest / npm / go / gradle / maven), install deps, and run it. */
   runTests(dir) {
     if (!this.allowEdits)
       return { content: "run_tests is not available", isError: true };
@@ -77282,7 +77282,20 @@ ${t.out}`), isError: t.code !== 0, ran: true };
       return { content: this.trunc(`$ go test ./... (in ${where})
 ${t.out}`), isError: t.code !== 0, ran: true };
     }
-    return { content: "run_tests: no recognized test setup (pytest/npm/go) found in this directory", isError: true, ran: false };
+    const isGradle = has2("gradlew") || has2("build.gradle") || has2("build.gradle.kts") || has2("settings.gradle") || has2("settings.gradle.kts");
+    if (isGradle || has2("pom.xml")) {
+      const kind = isGradle ? "Gradle" : "Maven";
+      return {
+        content: `run_tests: ${kind} (JVM) project \u2014 its suite needs the build toolchain + service infra, so it is validated by the repo's CI (which runs the ${kind} build), not in-agent. Write/adjust the test files on the branch; CI runs them.`,
+        isError: true,
+        ran: false
+      };
+    }
+    return {
+      content: "run_tests: no recognized test setup (pytest/npm/go/gradle/maven) found in this directory",
+      isError: true,
+      ran: false
+    };
   }
   /** The package.json `test` script, if it's a real one (npm's default "no test specified" stub doesn't count). */
   npmTestScript(cwd) {
