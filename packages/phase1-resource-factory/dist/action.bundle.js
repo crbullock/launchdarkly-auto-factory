@@ -80166,9 +80166,9 @@ async function main() {
     const label = approveLabel(node);
     await ensureLabel(context.REPO, label, process.env.GITHUB_TOKEN);
     console.log(`::warning::AutoFactory: awaiting approval before '${node}'. Add the PR label '${label}' to proceed.`);
-    const writesOff = process.env.ENABLE_CODE_CHANGES !== "true";
+    const writesOff2 = process.env.ENABLE_CODE_CHANGES !== "true";
     let summary2;
-    if (writesOff) {
+    if (writesOff2) {
       let manifest = null;
       try {
         if (context.PR_NUMBER) {
@@ -80183,13 +80183,21 @@ async function main() {
       summary2 = buildGateComment(policy.steps.map((s2) => s2.step), approvedSteps, node);
     }
     await postPrComment(summary2, { prNumber: context.PR_NUMBER, repo: context.REPO });
-    await postCheckRun({
-      repo: context.REPO,
-      headSha: context.HEAD_SHA,
-      conclusion: "action_required",
-      title: `Approval required before ${node}`,
-      summary: `The AutoFactory chain paused before \`${node}\`. Nothing was created for this or later steps. Add the PR label \`${label}\` to approve; the chain resumes on the next run.`
-    });
+    await postCheckRun(
+      writesOff2 ? {
+        repo: context.REPO,
+        headSha: context.HEAD_SHA,
+        conclusion: "neutral",
+        title: "AutoFactory \xB7 advisory (non-blocking)",
+        summary: "Preview only \u2014 AutoFactory analyzed this PR and proposed a flag (see the comment). **Nothing was created and this check never blocks merge.** To act on the plan, add the `af-build` label."
+      } : {
+        repo: context.REPO,
+        headSha: context.HEAD_SHA,
+        conclusion: "action_required",
+        title: `Approval required before ${node}`,
+        summary: `The AutoFactory chain paused before \`${node}\`. Nothing was created for this or later steps. Add the PR label \`${label}\` to approve; the chain resumes on the next run.`
+      }
+    );
     return;
   }
   if (gate) {
@@ -80243,15 +80251,16 @@ async function main() {
     ...agentRows.length ? agentRows : ["| (none ran) | \u2014 | \u2014 | \u2014 |"]
   ].filter(Boolean).join("\n");
   await postPrComment(summary, { prNumber: context.PR_NUMBER, repo: context.REPO });
+  const writesOff = process.env.ENABLE_CODE_CHANGES !== "true";
   await postCheckRun({
     name: "AutoFactory \u2014 Phase 1",
     repo: context.REPO,
     headSha: checkoutHeadSha(sandboxRoot) ?? context.HEAD_SHA,
-    conclusion: !walk2.verificationFailed && (decision.apply || decision.noop) ? "success" : "failure",
-    title: walk2.verificationFailed ? `Deterministic check failed after ${walk2.verificationFailed.node}` : decision.reason,
+    conclusion: writesOff ? "neutral" : !walk2.verificationFailed && (decision.apply || decision.noop) ? "success" : "failure",
+    title: writesOff ? "AutoFactory \xB7 advisory (non-blocking)" : walk2.verificationFailed ? `Deterministic check failed after ${walk2.verificationFailed.node}` : decision.reason,
     summary
   });
-  if (walk2.verificationFailed || !decision.apply && !decision.noop) process.exitCode = 1;
+  if (!writesOff && (walk2.verificationFailed || !decision.apply && !decision.noop)) process.exitCode = 1;
 }
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e6) => {
