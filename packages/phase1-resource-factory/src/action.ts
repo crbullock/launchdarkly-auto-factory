@@ -631,16 +631,30 @@ async function main(): Promise<void> {
       summary = buildGateComment(policy.steps.map((s) => s.step), approvedSteps, node);
     }
     await postPrComment(summary, { prNumber: context.PR_NUMBER, repo: context.REPO });
-    // Carry the pause as a distinct `action_required` check run rather than a red
-    // failure, so it doesn't read as a pipeline error or a reviewer rejection
-    // (which also exit 1). The job itself exits 0 — the check run is the signal.
-    await postCheckRun({
-      repo: context.REPO,
-      headSha: context.HEAD_SHA,
-      conclusion: "action_required",
-      title: `Approval required before ${node}`,
-      summary: `The AutoFactory chain paused before \`${node}\`. Nothing was created for this or later steps. Add the PR label \`${label}\` to approve; the chain resumes on the next run.`,
-    });
+    // Dry run (writes off) → this is an ADVISORY preview on a PR that did not opt
+    // in; post a `neutral` (grey, non-blocking) check so it never reads as "your PR
+    // needs approval". Only when writes are on (the author opted in via af-build)
+    // do we post `action_required` — a real "approve to continue" signal they want.
+    // Either way the job exits 0; the check run carries the state, not a red failure.
+    await postCheckRun(
+      writesOff
+        ? {
+            repo: context.REPO,
+            headSha: context.HEAD_SHA,
+            conclusion: "neutral",
+            title: "AutoFactory · advisory (non-blocking)",
+            summary:
+              "Preview only — AutoFactory analyzed this PR and proposed a flag (see the comment). " +
+              "**Nothing was created and this check never blocks merge.** To act on the plan, add the `af-build` label.",
+          }
+        : {
+            repo: context.REPO,
+            headSha: context.HEAD_SHA,
+            conclusion: "action_required",
+            title: `Approval required before ${node}`,
+            summary: `The AutoFactory chain paused before \`${node}\`. Nothing was created for this or later steps. Add the PR label \`${label}\` to approve; the chain resumes on the next run.`,
+          },
+    );
     return;
   }
 
@@ -720,20 +734,35 @@ async function main(): Promise<void> {
   // Always post the verdict as a named check run, attached to the POST-chain
   // HEAD: the agents' [skip ci] commits move the PR head past the event's head
   // SHA, so without this the PR's latest commit shows no AutoFactory status.
+  //
+  // Dry run (writes off) → this PR did NOT opt in, so the result is advisory: a
+  // dry-run chain structurally cannot complete (it can't create the flag, so it
+  // stalls before the reviewer), and that "INCOMPLETE" is EXPECTED, not a failure.
+  // Post `neutral` (grey, non-blocking) so it never shows a red X on an unrelated
+  // author's PR. Only a PR that opted in (writes on) gets a real pass/fail verdict.
+  const writesOff = process.env.ENABLE_CODE_CHANGES !== "true";
   await postCheckRun({
     name: "AutoFactory — Phase 1",
     repo: context.REPO,
     headSha: checkoutHeadSha(sandboxRoot) ?? context.HEAD_SHA,
-    conclusion: !walk.verificationFailed && (decision.apply || decision.noop) ? "success" : "failure",
-    title: walk.verificationFailed ? `Deterministic check failed after ${walk.verificationFailed.node}` : decision.reason,
+    conclusion: writesOff
+      ? "neutral"
+      : !walk.verificationFailed && (decision.apply || decision.noop)
+        ? "success"
+        : "failure",
+    title: writesOff
+      ? "AutoFactory · advisory (non-blocking)"
+      : walk.verificationFailed
+        ? `Deterministic check failed after ${walk.verificationFailed.node}`
+        : decision.reason,
     summary,
   });
 
-  // Non-zero exit fails the PR check. Green: applied, human-approval pause, or a
-  // no-op (no flag needed). Red: a genuine rejection, an incomplete run (the
-  // chain stalled / never reviewed), or a failed deterministic check — each
-  // carries its own distinct message above.
-  if (walk.verificationFailed || (!decision.apply && !decision.noop)) process.exitCode = 1;
+  // Non-zero exit fails the PR check. Only opted-in (writes-on) runs can fail:
+  // green = applied / approval-pause / no-op; red = genuine rejection, incomplete
+  // run, or failed deterministic check. Dry-run runs are advisory and always
+  // exit 0 so they never turn the workflow job red on an unrelated PR.
+  if (!writesOff && (walk.verificationFailed || (!decision.apply && !decision.noop))) process.exitCode = 1;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
