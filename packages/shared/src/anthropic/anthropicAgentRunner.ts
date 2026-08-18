@@ -340,9 +340,12 @@ export class AnthropicAgentRunner implements AgentRunner {
       flagState: grant.flagState === true && this.opts.writer !== undefined,
       createMetric: grant.createMetric && this.opts.writer !== undefined,
       editFiles: grant.editFiles && this.opts.codeChangesEnabled === true,
-      // Manifest writes are code changes — same global toggle as editFiles.
-      writeManifest: grant.writeManifest === true && this.opts.codeChangesEnabled === true,
-      stewardManifest: grant.stewardManifest === true && this.opts.codeChangesEnabled === true,
+      // Manifest writes are offered even in a dry run (codeChangesEnabled=false) so
+      // the planner produces the .release-flags manifest and the action can surface
+      // the proposed plan on the PR. In a dry run gitMode is forced to "workingTree"
+      // below, so the file is written but NEVER committed/pushed — the PR is untouched.
+      writeManifest: grant.writeManifest === true,
+      stewardManifest: grant.stewardManifest === true,
       // Read-only; globally enabled by the presence of a composed graph (KG flag).
       queryGraph: grant.queryGraph === true && this.opts.knowledgeGraph !== undefined,
       // Read-only; soft when SENTRY_* unset (estate picture returns available:false).
@@ -366,15 +369,18 @@ export class AnthropicAgentRunner implements AgentRunner {
     // Parity with the Cursor runner's model log: the served variation's model is
     // what makes A/B run logs attributable without querying LD monitoring.
     console.log(`[node] ${req.configKey} ${this.providerName} model → '${model}'${req.model && req.model !== model ? ` (LD: '${req.model}')` : ""}`);
+    // Dry run (no code changes) → write the manifest to the working tree only,
+    // never commit/push it, so the plan can be surfaced without touching the PR.
+    const effectiveGitMode = this.opts.codeChangesEnabled === true ? (this.opts.gitMode ?? "push") : "workingTree";
     const executor = new SandboxToolExecutor(
       this.opts.sandboxRoot,
       writer,
       caps.editFiles,
       this.opts.prBranch,
       this.opts.prBaseRef,
-      this.opts.gitMode ?? "push",
-      caps.writeManifest === true && this.opts.codeChangesEnabled === true,
-      caps.stewardManifest === true && this.opts.codeChangesEnabled === true,
+      effectiveGitMode,
+      caps.writeManifest === true,
+      caps.stewardManifest === true,
     );
     if (caps.queryGraph && this.opts.knowledgeGraph) {
       executor.provideKnowledgeGraph(this.opts.knowledgeGraph, this.opts.changedFiles ?? []);

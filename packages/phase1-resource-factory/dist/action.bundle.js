@@ -77026,8 +77026,9 @@ ${verdicts.join("\n")}` : "")
    * Release-manifest writes: schema-validated, MERGED (never clobbering), with
    * the human-editable releaseIntent block structurally protected — agents get
    * create-if-absent semantics; only the steward grade may update an existing
-   * intent. Auto-commits the manifest (GITHUB_TOKEN push — no recursive run, so
-   * no [skip ci] needed) in push mode; leaves it in the working tree otherwise.
+   * intent. Auto-commits the manifest (with the [skip ci] loop guard) in push
+   * mode; in workingTree mode (dry run) it writes the file but does NOT commit,
+   * so the action can surface the proposed plan without touching the PR.
    */
   writeManifestTool(rel, incoming) {
     if (!this.allowWriteManifest && !this.stewardManifest) {
@@ -77105,7 +77106,9 @@ ${verdicts.join("\n")}` : "")
         this.runGit(["add", rel]);
         const staged = this.runGit(["diff", "--cached", "--name-only"]).trim();
         if (staged) {
-          this.runGit(["commit", "-m", `chore(auto-factory): ${existed ? "update" : "create"} ${rel}`]);
+          this.runGit(["commit", "-m", `chore(auto-factory): ${existed ? "update" : "create"} ${rel}
+
+[skip ci]`]);
           const branch = this.prBranch ?? process.env.PR_BRANCH;
           this.runGit(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
           commitNote = "committed and pushed to the PR branch";
@@ -77331,7 +77334,10 @@ ${t.out}`), isError: t.code !== 0, ran: true };
       const staged = this.runGit(["diff", "--cached", "--name-only"]).trim();
       if (!staged)
         return { content: "commit_and_push: no changes to commit" };
-      this.runGit(["commit", "-m", message]);
+      const ciSafeMessage = /\[(skip ci|ci skip)\]/i.test(message) ? message : `${message}
+
+[skip ci]`;
+      this.runGit(["commit", "-m", ciSafeMessage]);
       const branch = this.prBranch ?? process.env.PR_BRANCH;
       this.runGit(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
       return { content: `Committed and pushed (${staged.split("\n").length} file(s)): ${message}` };
@@ -78094,9 +78100,12 @@ var AnthropicAgentRunner = class {
       flagState: grant.flagState === true && this.opts.writer !== void 0,
       createMetric: grant.createMetric && this.opts.writer !== void 0,
       editFiles: grant.editFiles && this.opts.codeChangesEnabled === true,
-      // Manifest writes are code changes — same global toggle as editFiles.
-      writeManifest: grant.writeManifest === true && this.opts.codeChangesEnabled === true,
-      stewardManifest: grant.stewardManifest === true && this.opts.codeChangesEnabled === true,
+      // Manifest writes are offered even in a dry run (codeChangesEnabled=false) so
+      // the planner produces the .release-flags manifest and the action can surface
+      // the proposed plan on the PR. In a dry run gitMode is forced to "workingTree"
+      // below, so the file is written but NEVER committed/pushed — the PR is untouched.
+      writeManifest: grant.writeManifest === true,
+      stewardManifest: grant.stewardManifest === true,
       // Read-only; globally enabled by the presence of a composed graph (KG flag).
       queryGraph: grant.queryGraph === true && this.opts.knowledgeGraph !== void 0,
       // Read-only; soft when SENTRY_* unset (estate picture returns available:false).
@@ -78110,7 +78119,8 @@ var AnthropicAgentRunner = class {
     const writer = caps.createFlag || caps.createMetric || caps.flagState ? this.opts.writer : void 0;
     const model = this.modelId(req.model);
     console.log(`[node] ${req.configKey} ${this.providerName} model \u2192 '${model}'${req.model && req.model !== model ? ` (LD: '${req.model}')` : ""}`);
-    const executor = new SandboxToolExecutor(this.opts.sandboxRoot, writer, caps.editFiles, this.opts.prBranch, this.opts.prBaseRef, this.opts.gitMode ?? "push", caps.writeManifest === true && this.opts.codeChangesEnabled === true, caps.stewardManifest === true && this.opts.codeChangesEnabled === true);
+    const effectiveGitMode = this.opts.codeChangesEnabled === true ? this.opts.gitMode ?? "push" : "workingTree";
+    const executor = new SandboxToolExecutor(this.opts.sandboxRoot, writer, caps.editFiles, this.opts.prBranch, this.opts.prBaseRef, effectiveGitMode, caps.writeManifest === true, caps.stewardManifest === true);
     if (caps.queryGraph && this.opts.knowledgeGraph) {
       executor.provideKnowledgeGraph(this.opts.knowledgeGraph, this.opts.changedFiles ?? []);
     }
@@ -79914,7 +79924,9 @@ async function reviewManifestIntent(opts) {
           git2(["config", "user.name", "LaunchDarkly AutoFactory"]);
           git2(["add", rel]);
           if (git2(["diff", "--cached", "--name-only"]).trim()) {
-            git2(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}`]);
+            git2(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}
+
+[skip ci]`]);
             const branch = opts.prBranch ?? process.env.PR_BRANCH;
             git2(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
             console.log(`Release intent: recorded approvedBy=${actor} in ${rel}.`);
@@ -79960,23 +79972,35 @@ function buildGateComment(gatedSteps, approved, pendingNode) {
     ...lines
   ].join("\n");
 }
-function buildDryRunPlanComment(runs, pendingNode) {
-  const planner = runs.find((r6) => r6.configKey === "autofactory-research-planner") ?? runs.find((r6) => /planner|steward/.test(r6.configKey)) ?? runs[runs.length - 1];
-  const signals = planner ? Object.entries(planner.tags).map(([k6, v]) => `\`${k6}=${v}\``).join(", ") : "";
-  const narrative = (planner?.output ?? "").trim().slice(0, 2500);
-  return [
-    "### LaunchDarkly Auto-Factory \u2014 Phase 1 \xB7 proposed plan (dry run)",
+function buildDryRunPlanComment(manifest, pendingNode) {
+  const nextSteps = [
     "",
-    "This is a **preview** \u2014 no flag, code, or manifest was created. Review the plan below, then:",
-    "1. add the **`af-build`** label \u2192 commits the plan as `.release-flags/pr-<N>.json` (still no flag or code), then",
-    `2. add **\`${approveLabel(pendingNode)}\`** \u2192 creates the flag (targeting off) and wires the code.`,
-    signals ? `
-**Signals:** ${signals}` : "",
-    narrative ? `
----
-
-${narrative}` : ""
-  ].filter(Boolean).join("\n");
+    "Nothing was created. To proceed:",
+    "1. add the **`af-build`** label \u2192 commits this plan as `.release-flags/pr-<N>.json` (still no flag or code), then",
+    `2. add **\`${approveLabel(pendingNode)}\`** \u2192 creates the flag (targeting off) and wires the code.`
+  ];
+  if (!manifest || typeof manifest.flagKey !== "string") {
+    return [
+      "### LaunchDarkly Auto-Factory \u2014 Phase 1 \xB7 dry run",
+      "",
+      "The chain analyzed this PR but did not produce a concrete flag plan (it may not need a flag).",
+      ...nextSteps
+    ].join("\n");
+  }
+  const scope = typeof manifest.scope === "string" ? manifest.scope : "frontend";
+  const targetVariation = typeof manifest.targetVariation === "string" ? manifest.targetVariation : void 0;
+  const kind = targetVariation ? `multivariate (control \u2192 ${targetVariation})` : "boolean (off \u2192 on)";
+  const releasePlan = manifest.releasePlan ?? {};
+  const metricKeys = Array.isArray(releasePlan.metricKeys) ? releasePlan.metricKeys.map(String) : [];
+  const releaseIntent = manifest.releaseIntent ?? {};
+  const action = typeof releaseIntent.action === "string" ? releaseIntent.action : "auto";
+  return [
+    "### LaunchDarkly Auto-Factory \u2014 Phase 1 \xB7 proposed flag (dry run)",
+    "",
+    `**Flag:** \`${manifest.flagKey}\` \xB7 ${kind} \xB7 scope: \`${scope}\``,
+    `**Metrics:** ${metricKeys.length ? metricKeys.map((k6) => `\`${k6}\``).join(", ") : "none"} \xB7 **Release intent:** \`${action}\``,
+    ...nextSteps
+  ].join("\n");
 }
 function buildVariables(ctx) {
   return {
@@ -80143,7 +80167,21 @@ async function main() {
     await ensureLabel(context.REPO, label, process.env.GITHUB_TOKEN);
     console.log(`::warning::AutoFactory: awaiting approval before '${node}'. Add the PR label '${label}' to proceed.`);
     const writesOff = process.env.ENABLE_CODE_CHANGES !== "true";
-    const summary2 = writesOff ? buildDryRunPlanComment(walk2.runs, node) : buildGateComment(policy.steps.map((s2) => s2.step), approvedSteps, node);
+    let summary2;
+    if (writesOff) {
+      let manifest = null;
+      try {
+        if (context.PR_NUMBER) {
+          const abs = join12(sandboxRoot, `.release-flags/pr-${context.PR_NUMBER}.json`);
+          if (existsSync6(abs)) manifest = JSON.parse(readFileSync8(abs, "utf8"));
+        }
+      } catch {
+        manifest = null;
+      }
+      summary2 = buildDryRunPlanComment(manifest, node);
+    } else {
+      summary2 = buildGateComment(policy.steps.map((s2) => s2.step), approvedSteps, node);
+    }
     await postPrComment(summary2, { prNumber: context.PR_NUMBER, repo: context.REPO });
     await postCheckRun({
       repo: context.REPO,

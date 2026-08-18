@@ -200,10 +200,10 @@ function flagCreationWriter(): LdResourceWriter | undefined {
 }
 
 /**
- * HEAD of the checkout after the chain ran. The agents push commits, which
- * move the PR head PAST the event's head SHA — so the final verdict check run
- * must attach to this SHA to be visible on the PR's latest commit. Falls back
- * to undefined (caller uses the event's head SHA).
+ * HEAD of the checkout after the chain ran. The agents push commits (with
+ * [skip ci]), which move the PR head PAST the event's head SHA — so the final
+ * verdict check run must attach to this SHA to be visible on the PR's latest
+ * commit. Falls back to undefined (caller uses the event's head SHA).
  */
 function checkoutHeadSha(root: string): string | undefined {
   try {
@@ -251,7 +251,7 @@ async function reviewManifestIntent(opts: {
           git(["config", "user.name", "LaunchDarkly AutoFactory"]);
           git(["add", rel]);
           if (git(["diff", "--cached", "--name-only"]).trim()) {
-            git(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}`]);
+            git(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}\n\n[skip ci]`]);
             const branch = opts.prBranch ?? process.env.PR_BRANCH;
             git(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
             console.log(`Release intent: recorded approvedBy=${actor} in ${rel}.`);
@@ -320,37 +320,40 @@ function buildGateComment(gatedSteps: string[], approved: Set<string>, pendingNo
 }
 
 /**
- * Dry-run plan preview. When code changes are disabled the chain analyzes the PR
- * but is never handed the write tools, so nothing — not even the manifest — is
- * created. Surface the planner's recommendation as a PR comment so a human can
- * review the intended flag BEFORE opting in, and spell out the two-step path:
- * `af-build` to commit the plan manifest, then the approve label to build it.
+ * Dry-run plan preview: a SHORT summary of the flag the chain proposes, so a human
+ * can review it before opting in. The plan comes from the manifest the planner wrote
+ * to the working tree (never committed in a dry run — see anthropicAgentRunner). When
+ * no manifest was produced (e.g. the chain decided no flag is needed) we say so.
  */
-function buildDryRunPlanComment(
-  runs: Array<{ configKey: string; tags: Record<string, string>; output?: string }>,
-  pendingNode: string,
-): string {
-  const planner =
-    runs.find((r) => r.configKey === "autofactory-research-planner") ??
-    runs.find((r) => /planner|steward/.test(r.configKey)) ??
-    runs[runs.length - 1];
-  const signals = planner
-    ? Object.entries(planner.tags)
-        .map(([k, v]) => `\`${k}=${v}\``)
-        .join(", ")
-    : "";
-  const narrative = (planner?.output ?? "").trim().slice(0, 2500);
-  return [
-    "### LaunchDarkly Auto-Factory — Phase 1 · proposed plan (dry run)",
+function buildDryRunPlanComment(manifest: Record<string, unknown> | null, pendingNode: string): string {
+  const nextSteps = [
     "",
-    "This is a **preview** — no flag, code, or manifest was created. Review the plan below, then:",
-    "1. add the **`af-build`** label → commits the plan as `.release-flags/pr-<N>.json` (still no flag or code), then",
+    "Nothing was created. To proceed:",
+    "1. add the **`af-build`** label → commits this plan as `.release-flags/pr-<N>.json` (still no flag or code), then",
     `2. add **\`${approveLabel(pendingNode)}\`** → creates the flag (targeting off) and wires the code.`,
-    signals ? `\n**Signals:** ${signals}` : "",
-    narrative ? `\n---\n\n${narrative}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ];
+  if (!manifest || typeof manifest.flagKey !== "string") {
+    return [
+      "### LaunchDarkly Auto-Factory — Phase 1 · dry run",
+      "",
+      "The chain analyzed this PR but did not produce a concrete flag plan (it may not need a flag).",
+      ...nextSteps,
+    ].join("\n");
+  }
+  const scope = typeof manifest.scope === "string" ? manifest.scope : "frontend";
+  const targetVariation = typeof manifest.targetVariation === "string" ? manifest.targetVariation : undefined;
+  const kind = targetVariation ? `multivariate (control → ${targetVariation})` : "boolean (off → on)";
+  const releasePlan = (manifest.releasePlan ?? {}) as Record<string, unknown>;
+  const metricKeys = Array.isArray(releasePlan.metricKeys) ? (releasePlan.metricKeys as unknown[]).map(String) : [];
+  const releaseIntent = (manifest.releaseIntent ?? {}) as Record<string, unknown>;
+  const action = typeof releaseIntent.action === "string" ? releaseIntent.action : "auto";
+  return [
+    "### LaunchDarkly Auto-Factory — Phase 1 · proposed flag (dry run)",
+    "",
+    `**Flag:** \`${manifest.flagKey}\` · ${kind} · scope: \`${scope}\``,
+    `**Metrics:** ${metricKeys.length ? metricKeys.map((k) => `\`${k}\``).join(", ") : "none"} · **Release intent:** \`${action}\``,
+    ...nextSteps,
+  ].join("\n");
 }
 
 /**
@@ -607,14 +610,26 @@ async function main(): Promise<void> {
     const label = approveLabel(node);
     await ensureLabel(context.REPO, label, process.env.GITHUB_TOKEN);
     console.log(`::warning::AutoFactory: awaiting approval before '${node}'. Add the PR label '${label}' to proceed.`);
-    // Writes off (dry run) → the manifest was NOT written, so show the plan
-    // preview + the af-build → approve path. Writes on → the manifest is already
-    // committed and the only remaining gate is the approve label, so show the
-    // step-by-step gate board.
+    // Writes off (dry run) → show a concise preview of the proposed flag, read
+    // from the manifest the planner wrote to the working tree (never committed in a
+    // dry run). Writes on → the manifest is already committed and the only remaining
+    // gate is the approve label, so show the step-by-step gate board.
     const writesOff = process.env.ENABLE_CODE_CHANGES !== "true";
-    const summary = writesOff
-      ? buildDryRunPlanComment(walk.runs, node)
-      : buildGateComment(policy.steps.map((s) => s.step), approvedSteps, node);
+    let summary: string;
+    if (writesOff) {
+      let manifest: Record<string, unknown> | null = null;
+      try {
+        if (context.PR_NUMBER) {
+          const abs = join(sandboxRoot, `.release-flags/pr-${context.PR_NUMBER}.json`);
+          if (existsSync(abs)) manifest = JSON.parse(readFileSync(abs, "utf8")) as Record<string, unknown>;
+        }
+      } catch {
+        manifest = null;
+      }
+      summary = buildDryRunPlanComment(manifest, node);
+    } else {
+      summary = buildGateComment(policy.steps.map((s) => s.step), approvedSteps, node);
+    }
     await postPrComment(summary, { prNumber: context.PR_NUMBER, repo: context.REPO });
     // Carry the pause as a distinct `action_required` check run rather than a red
     // failure, so it doesn't read as a pipeline error or a reviewer rejection
@@ -703,8 +718,8 @@ async function main(): Promise<void> {
   await postPrComment(summary, { prNumber: context.PR_NUMBER, repo: context.REPO });
 
   // Always post the verdict as a named check run, attached to the POST-chain
-  // HEAD: the agents' commits move the PR head past the event's head SHA, so
-  // without this the PR's latest commit shows no AutoFactory status.
+  // HEAD: the agents' [skip ci] commits move the PR head past the event's head
+  // SHA, so without this the PR's latest commit shows no AutoFactory status.
   await postCheckRun({
     name: "AutoFactory — Phase 1",
     repo: context.REPO,
