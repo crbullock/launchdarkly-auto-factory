@@ -1131,8 +1131,8 @@ export class SandboxToolExecutor {
    * Release-manifest writes: schema-validated, MERGED (never clobbering), with
    * the human-editable releaseIntent block structurally protected — agents get
    * create-if-absent semantics; only the steward grade may update an existing
-   * intent. Auto-commits the manifest (with the [skip ci] loop guard) in push
-   * mode; leaves it in the working tree otherwise.
+   * intent. Auto-commits the manifest (GITHUB_TOKEN push — no recursive run, so
+   * no [skip ci] needed) in push mode; leaves it in the working tree otherwise.
    */
   private writeManifestTool(rel: string, incoming: unknown): ToolExecResult {
     if (!this.allowWriteManifest && !this.stewardManifest) {
@@ -1248,7 +1248,7 @@ export class SandboxToolExecutor {
         this.runGit(["add", rel]);
         const staged = this.runGit(["diff", "--cached", "--name-only"]).trim();
         if (staged) {
-          this.runGit(["commit", "-m", `chore(auto-factory): ${existed ? "update" : "create"} ${rel}\n\n[skip ci]`]);
+          this.runGit(["commit", "-m", `chore(auto-factory): ${existed ? "update" : "create"} ${rel}`]);
           const branch = this.prBranch ?? process.env.PR_BRANCH;
           this.runGit(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
           commitNote = "committed and pushed to the PR branch";
@@ -1503,16 +1503,13 @@ export class SandboxToolExecutor {
       // Nothing staged → report rather than fail the node.
       const staged = this.runGit(["diff", "--cached", "--name-only"]).trim();
       if (!staged) return { content: "commit_and_push: no changes to commit" };
-      // CI-LOOP GUARD: append [skip ci] so the agents' own push does NOT trigger a
-      // new workflow run. This is the only reliable guard — a job-level `if:` can't
-      // help because GitHub gates bot-triggered PR runs for approval at the run
-      // level, BEFORE job conditions evaluate, so each agent commit would otherwise
-      // sit waiting for manual approval (and risk a re-run loop). Tradeoff: this
-      // skips ALL workflows on the agent commit, not just AutoFactory — acceptable
-      // because the agents already run tests in-chain and the human's own pushes
-      // (and the post-merge deploy) still trigger CI normally.
-      const ciSafeMessage = /\[(skip ci|ci skip)\]/i.test(message) ? message : `${message}\n\n[skip ci]`;
-      this.runGit(["commit", "-m", ciSafeMessage]);
+      // No [skip ci]: the push uses the workflow's GITHUB_TOKEN, and commits made
+      // with GITHUB_TOKEN never create a new workflow run (GitHub's built-in
+      // anti-recursion), so there is no loop to guard against. [skip ci] was worse
+      // than useless here — because it lands on the PR HEAD, GitHub then suppresses
+      // the human's subsequent `labeled` events too, which broke the approval-gate
+      // "add a label to resume" flow. Leave the agent's message intact.
+      this.runGit(["commit", "-m", message]);
       const branch = this.prBranch ?? process.env.PR_BRANCH;
       this.runGit(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
       return { content: `Committed and pushed (${staged.split("\n").length} file(s)): ${message}` };

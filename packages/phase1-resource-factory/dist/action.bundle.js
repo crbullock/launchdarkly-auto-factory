@@ -77026,8 +77026,8 @@ ${verdicts.join("\n")}` : "")
    * Release-manifest writes: schema-validated, MERGED (never clobbering), with
    * the human-editable releaseIntent block structurally protected — agents get
    * create-if-absent semantics; only the steward grade may update an existing
-   * intent. Auto-commits the manifest (with the [skip ci] loop guard) in push
-   * mode; leaves it in the working tree otherwise.
+   * intent. Auto-commits the manifest (GITHUB_TOKEN push — no recursive run, so
+   * no [skip ci] needed) in push mode; leaves it in the working tree otherwise.
    */
   writeManifestTool(rel, incoming) {
     if (!this.allowWriteManifest && !this.stewardManifest) {
@@ -77105,9 +77105,7 @@ ${verdicts.join("\n")}` : "")
         this.runGit(["add", rel]);
         const staged = this.runGit(["diff", "--cached", "--name-only"]).trim();
         if (staged) {
-          this.runGit(["commit", "-m", `chore(auto-factory): ${existed ? "update" : "create"} ${rel}
-
-[skip ci]`]);
+          this.runGit(["commit", "-m", `chore(auto-factory): ${existed ? "update" : "create"} ${rel}`]);
           const branch = this.prBranch ?? process.env.PR_BRANCH;
           this.runGit(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
           commitNote = "committed and pushed to the PR branch";
@@ -77333,10 +77331,7 @@ ${t.out}`), isError: t.code !== 0, ran: true };
       const staged = this.runGit(["diff", "--cached", "--name-only"]).trim();
       if (!staged)
         return { content: "commit_and_push: no changes to commit" };
-      const ciSafeMessage = /\[(skip ci|ci skip)\]/i.test(message) ? message : `${message}
-
-[skip ci]`;
-      this.runGit(["commit", "-m", ciSafeMessage]);
+      this.runGit(["commit", "-m", message]);
       const branch = this.prBranch ?? process.env.PR_BRANCH;
       this.runGit(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
       return { content: `Committed and pushed (${staged.split("\n").length} file(s)): ${message}` };
@@ -79919,9 +79914,7 @@ async function reviewManifestIntent(opts) {
           git2(["config", "user.name", "LaunchDarkly AutoFactory"]);
           git2(["add", rel]);
           if (git2(["diff", "--cached", "--name-only"]).trim()) {
-            git2(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}
-
-[skip ci]`]);
+            git2(["commit", "-m", `chore(auto-factory): record approvedBy=${actor} in ${rel}`]);
             const branch = opts.prBranch ?? process.env.PR_BRANCH;
             git2(branch ? ["push", "origin", `HEAD:${branch}`] : ["push"]);
             console.log(`Release intent: recorded approvedBy=${actor} in ${rel}.`);
@@ -79966,6 +79959,24 @@ function buildGateComment(gatedSteps, approved, pendingNode) {
     "",
     ...lines
   ].join("\n");
+}
+function buildDryRunPlanComment(runs, pendingNode) {
+  const planner = runs.find((r6) => r6.configKey === "autofactory-research-planner") ?? runs.find((r6) => /planner|steward/.test(r6.configKey)) ?? runs[runs.length - 1];
+  const signals = planner ? Object.entries(planner.tags).map(([k6, v]) => `\`${k6}=${v}\``).join(", ") : "";
+  const narrative = (planner?.output ?? "").trim().slice(0, 2500);
+  return [
+    "### LaunchDarkly Auto-Factory \u2014 Phase 1 \xB7 proposed plan (dry run)",
+    "",
+    "This is a **preview** \u2014 no flag, code, or manifest was created. Review the plan below, then:",
+    "1. add the **`af-build`** label \u2192 commits the plan as `.release-flags/pr-<N>.json` (still no flag or code), then",
+    `2. add **\`${approveLabel(pendingNode)}\`** \u2192 creates the flag (targeting off) and wires the code.`,
+    signals ? `
+**Signals:** ${signals}` : "",
+    narrative ? `
+---
+
+${narrative}` : ""
+  ].filter(Boolean).join("\n");
 }
 function buildVariables(ctx) {
   return {
@@ -80131,7 +80142,8 @@ async function main() {
     const label = approveLabel(node);
     await ensureLabel(context.REPO, label, process.env.GITHUB_TOKEN);
     console.log(`::warning::AutoFactory: awaiting approval before '${node}'. Add the PR label '${label}' to proceed.`);
-    const summary2 = buildGateComment(policy.steps.map((s2) => s2.step), approvedSteps, node);
+    const writesOff = process.env.ENABLE_CODE_CHANGES !== "true";
+    const summary2 = writesOff ? buildDryRunPlanComment(walk2.runs, node) : buildGateComment(policy.steps.map((s2) => s2.step), approvedSteps, node);
     await postPrComment(summary2, { prNumber: context.PR_NUMBER, repo: context.REPO });
     await postCheckRun({
       repo: context.REPO,
