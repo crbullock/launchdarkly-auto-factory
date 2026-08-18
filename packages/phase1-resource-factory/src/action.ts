@@ -328,9 +328,7 @@ function buildGateComment(gatedSteps: string[], approved: Set<string>, pendingNo
 function buildDryRunPlanComment(manifest: Record<string, unknown> | null, pendingNode: string): string {
   const nextSteps = [
     "",
-    "Nothing was created. To proceed:",
-    "1. add the **`af-build`** label → commits this plan as `.release-flags/pr-<N>.json` (still no flag or code), then",
-    `2. add **\`${approveLabel(pendingNode)}\`** → creates the flag (targeting off) and wires the code.`,
+    `Nothing was created (dry run). To build it — create the flag (targeting off), wire the code, and add tests — add the **\`${approveLabel(pendingNode)}\`** label. Everything happens in a single approved run.`,
   ];
   if (!manifest || typeof manifest.flagKey !== "string") {
     return [
@@ -645,7 +643,7 @@ async function main(): Promise<void> {
             title: "AutoFactory · advisory (non-blocking)",
             summary:
               "Preview only — AutoFactory analyzed this PR and proposed a flag (see the comment). " +
-              "**Nothing was created and this check never blocks merge.** To act on the plan, add the `af-build` label.",
+              `**Nothing was created and this check never blocks merge.** To build it, add the \`${approveLabel(node)}\` label.`,
           }
         : {
             repo: context.REPO,

@@ -1507,12 +1507,12 @@ export class SandboxToolExecutor {
       // CI-LOOP GUARD: append [skip ci]. Empirically (flexapp/flex2-orchestration
       // testing) the agents' own pushes DO trigger new `pull_request: synchronize`
       // runs — each auto-factory commit otherwise spawns a full agent re-run, a
-      // costly cascade. [skip ci] suppresses that. KNOWN TRADEOFF: because [skip ci]
+      // costly cascade. [skip ci] suppresses that. CONSEQUENCE: because [skip ci]
       // lands on the PR HEAD, GitHub also suppresses the human's later `labeled`
-      // events, so "add an af-approve label to resume a gated chain" does NOT
-      // re-trigger. Stage resume is therefore deferred to an issue_comment trigger
-      // (a `/af-approve` PR comment isn't blocked by [skip ci]); until then, resume
-      // needs a fresh push / manual re-run.
+      // events — so a label added AFTER an auto-factory commit does NOT re-trigger.
+      // The recommended flow avoids this entirely by using a SINGLE approval added
+      // while the head is still clean (before any auto-factory commit): the whole
+      // build then runs in that one approved pass, with no second label to suppress.
       const ciSafeMessage = /\[(skip ci|ci skip)\]/i.test(message) ? message : `${message}\n\n[skip ci]`;
       this.runGit(["commit", "-m", ciSafeMessage]);
       const branch = this.prBranch ?? process.env.PR_BRANCH;
